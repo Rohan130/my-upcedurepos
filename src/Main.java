@@ -19,7 +19,7 @@ public class Main {
         // Calculate global total salary
         double globalTotal = 0;
         for (Worker w : workers) {
-            globalTotal += w.getBaseSalarygit config --global user.email "your_github_email@example.com"();
+            globalTotal += w.getBaseSalary();
         }
 
         System.out.println("\nGlobal Total Salary = " + globalTotal);
