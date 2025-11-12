@@ -1,0 +1,24 @@
+@startuml
+left to right direction
+actor User
+actor "File System" as FS
+
+rectangle "Spreadsheet System" {
+  usecase "Set Cell Content" as UC1
+  usecase "Load Spreadsheet (S2V)" as UC2
+  usecase "Save Spreadsheet (S2V)" as UC3
+  usecase "Evaluate Formula" as UC4
+  usecase "Detect Circular Dependency" as UC5
+}
+
+User --> UC1
+User --> UC2
+User --> UC3̦
+FS   --> UC2
+FS   --> UC3
+
+UC1 ..> UC4 : <<include>>
+UC2 ..> UC4 : <<include>>
+UC1 ..> UC5 : <<extend>>
+UC2 ..> UC5 : <<extend>>
+@enduml
