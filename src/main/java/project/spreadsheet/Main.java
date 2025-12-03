@@ -1,40 +1,109 @@
 package project.spreadsheet;
 
 import project.spreadsheet.controller.SpreadsheetController;
+import project.spreadsheet.formula.EvalContext;
+import project.spreadsheet.formula.Expr;
 import project.spreadsheet.io.S2VReader;
 import project.spreadsheet.io.S2VWriter;
+import project.spreadsheet.parser.Parser;
 import project.spreadsheet.sheet.Spreadsheet;
 
 import java.nio.file.Path;
+import java.util.Scanner;
 
 public class Main {
-    public static void main(String[] args) throws Exception {
 
-        // Create spreadsheet + controller
+    public static void main(String[] args) {
+
         Spreadsheet sheet = new Spreadsheet();
         SpreadsheetController ctrl =
                 new SpreadsheetController(sheet, new S2VReader(), new S2VWriter());
 
-        // 1) Set some cell contents
-        ctrl.setCellContent("A1", "Hello");
-        ctrl.setCellContent("B1", "123");
-        ctrl.setCellContent("C1", "=A1+B1");  // stored, not evaluated
+        Scanner scanner = new Scanner(System.in);
+        Parser parser = new Parser();
+        EvalContext ctx = new EvalContext();
 
-        // 2) Save to file
-        Path file = Path.of("test.s2v");
-        ctrl.save(file);
-        System.out.println("Saved spreadsheet to: " + file.toAbsolutePath());
+        System.out.println("=== Spreadsheet Console ===");
 
-        // 3) Create a new spreadsheet & load the file
-        Spreadsheet sheet2 = new Spreadsheet();
-        SpreadsheetController ctrl2 =
-                new SpreadsheetController(sheet2, new S2VReader(), new S2VWriter());
+        boolean running = true;
+        while (running) {
+            System.out.println();
+            System.out.println("1) Set cell content");
+            System.out.println("2) View cell content");
+            System.out.println("3) Save spreadsheet to S2V");
+            System.out.println("4) Load spreadsheet from S2V");
+            System.out.println("5) Evaluate formula (no cells, e.g. 1+2*3)");
+            System.out.println("0) Exit");
+            System.out.print("Choose option: ");
 
-        ctrl2.load(file);
+            String choice = scanner.nextLine().trim();
 
-        // 4) Verify loaded content
-        System.out.println("Loaded A1: " + ctrl2.getCellContent("A1")); // Hello
-        System.out.println("Loaded B1: " + ctrl2.getCellContent("B1")); // 123
-        System.out.println("Loaded C1: " + ctrl2.getCellContent("C1")); // =A1+B1
+            try {
+                switch (choice) {
+                    case "1" -> {
+                        System.out.print("Enter cell coordinate (e.g., A1): ");
+                        String coord = scanner.nextLine().trim().toUpperCase();
+
+                        System.out.print("Enter cell content: ");
+                        String content = scanner.nextLine();
+
+                        // This will internally choose Text / Number / Formula
+                        ctrl.setCellContent(coord, content);
+                        System.out.println("Cell " + coord + " updated.");
+                    }
+
+                    case "2" -> {
+                        System.out.print("Enter cell coordinate (e.g., A1): ");
+                        String coord = scanner.nextLine().trim().toUpperCase();
+
+                        String raw = ctrl.getCellContent(coord);
+                        System.out.println("Cell " + coord + " content: " + raw);
+                    }
+
+                    case "3" -> {
+                        System.out.print("Enter path to save S2V file (e.g., sheet.s2v): ");
+                        String fileName = scanner.nextLine().trim();
+                        Path path = Path.of(fileName);
+
+                        ctrl.save(path);
+                        System.out.println("Spreadsheet saved to: " + path.toAbsolutePath());
+                    }
+
+                    case "4" -> {
+                        System.out.print("Enter path of S2V file to load: ");
+                        String fileName = scanner.nextLine().trim();
+                        Path path = Path.of(fileName);
+
+                        ctrl.load(path);
+                        System.out.println("Spreadsheet loaded from: " + path.toAbsolutePath());
+                    }
+
+                    case "5" -> {
+                        System.out.print("Enter formula (numbers only, e.g., 1+2*3): ");
+                        String formula = scanner.nextLine().trim();
+
+                        try {
+                            Expr expr = parser.parse(formula);
+                            double value = expr.eval(ctx);
+                            System.out.println(formula + " = " + value);
+                        } catch (IllegalArgumentException ex) {
+                            System.out.println("Error parsing formula: " + ex.getMessage());
+                        }
+                    }
+
+                    case "0" -> {
+                        running = false;
+                        System.out.println("Exiting...");
+                    }
+
+                    default -> System.out.println("Unknown option. Please try again.");
+                }
+            } catch (Exception ex) {
+                // For IO or other runtime errors
+                System.out.println("Error: " + ex.getMessage());
+            }
+        }
+
+        scanner.close();
     }
 }

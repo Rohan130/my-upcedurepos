@@ -1,13 +1,43 @@
 package project.spreadsheet.formula;
 
-import project.spreadsheet.sheet.Address;
-import java.util.Set;
-
+/**
+ * Composite node: binary operator like +, -, *, /.
+ */
 public class BinaryOp implements Expr {
-    public enum Op { ADD, SUB, MUL, DIV }
-    private Op op;
-    private Expr left, right;
 
-    public EvalResult eval(EvalContext ctx){ return null; }
-    public Set<Address> referencedAddresses(){ return null; }
+    private final String op;
+    private final Expr left;
+    private final Expr right;
+
+    public BinaryOp(String op, Expr left, Expr right) {
+        this.op = op;
+        this.left = left;
+        this.right = right;
+    }
+
+    @Override
+    public double eval(EvalContext ctx) {
+        double l = left.eval(ctx);
+        double r = right.eval(ctx);
+
+        return switch (op) {
+            case "+" -> l + r;
+            case "-" -> l - r;
+            case "*" -> l * r;
+            case "/" -> l / r;
+            default -> throw new IllegalArgumentException("Unsupported operator: " + op);
+        };
+    }
+
+    public String getOp() {
+        return op;
+    }
+
+    public Expr getLeft() {
+        return left;
+    }
+
+    public Expr getRight() {
+        return right;
+    }
 }

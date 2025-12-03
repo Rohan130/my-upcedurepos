@@ -1,13 +1,30 @@
 package project.spreadsheet.formula;
 
-import project.spreadsheet.sheet.Address;
 import java.util.List;
-import java.util.Set;
 
+/**
+ * Composite node: function call like SIN(3).
+ */
 public class FuncCall implements Expr {
-    private String name; // SUMA, MIN, MAX, PROMEDIO
-    private List<Expr> args;
 
-    public EvalResult eval(EvalContext ctx){ return null; }
-    public Set<Address> referencedAddresses(){ return null; }
+    private final String name;
+    private final List<Expr> args;
+
+    public FuncCall(String name, List<Expr> args) {
+        this.name = name;
+        this.args = args;
+    }
+
+    @Override
+    public double eval(EvalContext ctx) {
+        return ctx.apply(name, args);
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public List<Expr> getArgs() {
+        return args;
+    }
 }

@@ -1,11 +1,21 @@
 package project.spreadsheet.formula;
 
-import project.spreadsheet.sheet.Address;
 import project.spreadsheet.sheet.Range;
-import java.util.Set;
 
 public class RangeExpr implements Expr {
-    private Range range;
-    public EvalResult eval(EvalContext ctx){ return null; }
-    public Set<Address> referencedAddresses(){ return null; }
+
+    private final Range range;
+
+    public RangeExpr(Range range) {
+        this.range = range;
+    }
+
+    public Range getRange() {
+        return range;
+    }
+
+    @Override
+    public double eval(EvalContext ctx) {
+        throw new UnsupportedOperationException("Range evaluation not supported yet");
+    }
 }
