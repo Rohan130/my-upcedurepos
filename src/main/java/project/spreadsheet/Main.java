@@ -21,7 +21,9 @@ public class Main {
 
         Scanner scanner = new Scanner(System.in);
         Parser parser = new Parser();
-        EvalContext ctx = new EvalContext();
+
+        // ✅ FIX: EvalContext needs the spreadsheet
+        EvalContext ctx = new EvalContext(sheet);
 
         System.out.println("=== Spreadsheet Console ===");
 
@@ -32,7 +34,7 @@ public class Main {
             System.out.println("2) View cell content");
             System.out.println("3) Save spreadsheet to S2V");
             System.out.println("4) Load spreadsheet from S2V");
-            System.out.println("5) Evaluate formula (no cells, e.g. 1+2*3)");
+            System.out.println("5) Evaluate formula (e.g. 1+2*3 or A1+2)");
             System.out.println("0) Exit");
             System.out.print("Choose option: ");
 
@@ -47,7 +49,6 @@ public class Main {
                         System.out.print("Enter cell content: ");
                         String content = scanner.nextLine();
 
-                        // This will internally choose Text / Number / Formula
                         ctrl.setCellContent(coord, content);
                         System.out.println("Cell " + coord + " updated.");
                     }
@@ -79,7 +80,7 @@ public class Main {
                     }
 
                     case "5" -> {
-                        System.out.print("Enter formula (numbers only, e.g., 1+2*3): ");
+                        System.out.print("Enter formula (e.g., 1+2*3 or A1+2): ");
                         String formula = scanner.nextLine().trim();
 
                         try {
@@ -99,7 +100,6 @@ public class Main {
                     default -> System.out.println("Unknown option. Please try again.");
                 }
             } catch (Exception ex) {
-                // For IO or other runtime errors
                 System.out.println("Error: " + ex.getMessage());
             }
         }

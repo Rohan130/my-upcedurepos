@@ -4,7 +4,6 @@ import project.spreadsheet.sheet.Address;
 
 /**
  * Leaf node: reference to a cell like A1, B2.
- * Week 3: not supported yet.
  */
 public class CellRef implements Expr {
 
@@ -20,6 +19,6 @@ public class CellRef implements Expr {
 
     @Override
     public double eval(EvalContext ctx) {
-        throw new UnsupportedOperationException("Cell references not supported yet");
+        return ctx.getCellValue(address);
     }
 }
