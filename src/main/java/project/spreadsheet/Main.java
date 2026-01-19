@@ -22,7 +22,7 @@ public class Main {
         Scanner scanner = new Scanner(System.in);
         Parser parser = new Parser();
 
-        // ✅ FIX: EvalContext needs the spreadsheet
+        // EvalContext needs the spreadsheet for cell references, ranges, etc.
         EvalContext ctx = new EvalContext(sheet);
 
         System.out.println("=== Spreadsheet Console ===");
@@ -31,10 +31,12 @@ public class Main {
         while (running) {
             System.out.println();
             System.out.println("1) Set cell content");
-            System.out.println("2) View cell content");
+            System.out.println("2) View cell content (raw)");
             System.out.println("3) Save spreadsheet to S2V");
             System.out.println("4) Load spreadsheet from S2V");
             System.out.println("5) Evaluate formula (e.g. 1+2*3 or A1+2)");
+            System.out.println("6) View cell value (evaluated)");
+            System.out.println("7) Show range values as table (evaluated)");
             System.out.println("0) Exit");
             System.out.print("Choose option: ");
 
@@ -42,6 +44,7 @@ public class Main {
 
             try {
                 switch (choice) {
+
                     case "1" -> {
                         System.out.print("Enter cell coordinate (e.g., A1): ");
                         String coord = scanner.nextLine().trim().toUpperCase();
@@ -92,6 +95,21 @@ public class Main {
                         }
                     }
 
+                    case "6" -> {
+                        System.out.print("Enter cell coordinate (e.g., A1): ");
+                        String coord = scanner.nextLine().trim().toUpperCase();
+
+                        double value = ctrl.getCellValue(coord);
+                        System.out.println("Cell " + coord + " value: " + value);
+                    }
+
+                    case "7" -> {
+                        System.out.print("Enter range (e.g., A1:C3): ");
+                        String range = scanner.nextLine().trim().toUpperCase();
+
+                        ctrl.printRangeValues(range);
+                    }
+
                     case "0" -> {
                         running = false;
                         System.out.println("Exiting...");
@@ -106,4 +124,4 @@ public class Main {
 
         scanner.close();
     }
-}
+}git s
