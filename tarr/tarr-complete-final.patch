@@ -1,0 +1,346 @@
+diff --git a/include/linux/tcp.h b/include/linux/tcp.h
+index f72eef31fa23..8fe0eab082b8 100644
+--- a/include/linux/tcp.h
++++ b/include/linux/tcp.h
+@@ -128,12 +128,15 @@ struct tcp_options_received {
+ 	u8	num_sacks;	/* Number of SACK blocks		*/
+ 	u16	user_mss;	/* mss requested by user in ioctl	*/
+ 	u16	mss_clamp;	/* Maximal mss, negotiated at connection setup */
++	u8  tarr_cap;		/* TARR capability seen (len=4, ExID=0x00AC) */
++	u8  tarr_r;		/* TARR R value seen (len=5), 0=not seen */
+ };
+ 
+ static inline void tcp_clear_options(struct tcp_options_received *rx_opt)
+ {
+ 	rx_opt->tstamp_ok = rx_opt->sack_ok = 0;
+ 	rx_opt->wscale_ok = rx_opt->snd_wscale = 0;
++	rx_opt->tarr_cap = rx_opt->tarr_r = 0;
+ #if IS_ENABLED(CONFIG_SMC)
+ 	rx_opt->smc_ok = 0;
+ #endif
+@@ -163,6 +166,7 @@ struct tcp_request_sock {
+ 	u32				ts_off;
+ 	u32				snt_tsval_first;
+ 	u32				snt_tsval_last;
++	u8			tarr_cap;	/* TARR: SYN announced TARR capability */
+ 	u32				last_oow_ack_time; /* last SYNACK */
+ 	u32				rcv_nxt; /* the ack # by SYNACK. For
+ 						  * FastOpen it's the seq#
+@@ -524,6 +528,12 @@ struct tcp_sock {
+ 	 */
+ 	struct request_sock __rcu *fastopen_rsk;
+ 	struct saved_syn *saved_syn;
++
++/* TARR (TCP ACK Rate Request) per-connection state - RFC6994 ExID 0x00AC */
++	u8	tarr_enabled;		/* 1 = peer announced TARR support */
++	u8	tarr_r_sent;		/* last R value we sent (sender side) */
++	u8	tarr_r_recv;		/* last R value peer requested (receiver) */
++	u8	tarr_segs_rcvd;		/* data segs received since last ACK */
+ };
+ 
+ enum tsq_enum {
+diff --git a/include/net/netns/ipv4.h b/include/net/netns/ipv4.h
+index 8e971c7bf164..65a28f7a5e24 100644
+--- a/include/net/netns/ipv4.h
++++ b/include/net/netns/ipv4.h
+@@ -202,6 +202,7 @@ struct netns_ipv4 {
+ 	u8 sysctl_tcp_sack;
+ 	u8 sysctl_tcp_window_scaling;
+ 	u8 sysctl_tcp_timestamps;
++	u8 sysctl_tcp_tarr_r;		/* TARR R value: ACK every N segments */
+ 	int sysctl_tcp_rto_min_us;
+ 	int sysctl_tcp_rto_max_ms;
+ 	u8 sysctl_tcp_recovery;
+diff --git a/include/uapi/linux/tcp.h b/include/uapi/linux/tcp.h
+index 03772dd4d399..51c548c3c3ac 100644
+--- a/include/uapi/linux/tcp.h
++++ b/include/uapi/linux/tcp.h
+@@ -91,6 +91,16 @@ enum {
+ #define TCP_MSS_DEFAULT		 536U	/* IPv4 (RFC1122, RFC2581) */
+ #define TCP_MSS_DESIRED		1220U	/* IPv6 (tunneled), EDNS0 (RFC3226) */
+ 
++/* TCP experimental option (RFC6994) - TARR (ACK Rate Request) */
++#define TCPOPT_EXP              254     /* Experimental TCP option kind */
++#define TCPOPT_EXP_TARR_EXID    0x00AC  /* TARR Experiment ID */
++#define TCPOPT_EXP_TARR_LEN_CAP 4       /* Capability announcement length */
++#define TCPOPT_EXP_TARR_LEN_REQ 5       /* ACK rate request length */
++#define TCPOPT_EXP_TARR_R_MAX   127     /* Maximum R value (7 bits) */
++#define TCPOPT_EXP_TARR_LEN_CAP_ALIGNED	4	/* 4 bytes, already aligned */
++#define TCPOPT_EXP_TARR_LEN_REQ_ALIGNED	8	/* 5 bytes + 3 NOP padding = 8 */
++
++
+ /* TCP socket options */
+ #define TCP_NODELAY		1	/* Turn off Nagle's algorithm. */
+ #define TCP_MAXSEG		2	/* Limit MSS */
+diff --git a/net/ipv4/sysctl_net_ipv4.c b/net/ipv4/sysctl_net_ipv4.c
+index 643763bc2142..2d64f3c41d71 100644
+--- a/net/ipv4/sysctl_net_ipv4.c
++++ b/net/ipv4/sysctl_net_ipv4.c
+@@ -1215,6 +1215,13 @@ static struct ctl_table ipv4_net_table[] = {
+ 		.mode		= 0644,
+ 		.proc_handler	= proc_dou8vec_minmax,
+ 	},
++	{
++		.procname	= "tcp_tarr_r",
++		.data		= &init_net.ipv4.sysctl_tcp_tarr_r,
++		.maxlen		= sizeof(u8),
++		.mode		= 0644,
++		.proc_handler	= proc_dou8vec_minmax,
++	},
+ 	{
+ 		.procname	= "tcp_early_retrans",
+ 		.data		= &init_net.ipv4.sysctl_tcp_early_retrans,
+diff --git a/net/ipv4/tcp_input.c b/net/ipv4/tcp_input.c
+index 41c57efd125c..1b6f4e7c27f3 100644
+--- a/net/ipv4/tcp_input.c
++++ b/net/ipv4/tcp_input.c
+@@ -4650,6 +4650,21 @@ void tcp_parse_options(const struct net *net,
+ 					break;
+ 				}
+ 
++				/* TARR option (RFC6994, ExID=0x00AC) */
++				if (opsize >= TCPOPT_EXP_TARR_LEN_CAP &&
++				    get_unaligned_be16(ptr) == TCPOPT_EXP_TARR_EXID) {
++					if (opsize == TCPOPT_EXP_TARR_LEN_CAP) {
++						opt_rx->tarr_cap = 1;
++						break;
++					}
++					if (opsize == TCPOPT_EXP_TARR_LEN_REQ) {
++						u8 r = (*(ptr+2) >> 1) & TCPOPT_EXP_TARR_R_MAX;
++						opt_rx->tarr_cap = 1;
++						opt_rx->tarr_r = r;
++						break;
++					}
++				}
++
+ 				if (smc_parse_options(th, opt_rx, ptr, opsize))
+ 					break;
+ 
+@@ -6150,7 +6165,32 @@ static void __tcp_ack_snd_check(struct sock *sk, int ofo_possible)
+ 	unsigned long rtt;
+ 	u64 delay;
+ 
+-	    /* More than one full frame received... */
++		/* TARR: update r_recv from this packet's parsed R (draft Sec 3.2) */
++	if (tp->tarr_enabled && tp->rx_opt.tarr_r > 0) {
++		u32 mss0 = tp->advmss ? tp->advmss : 536;
++		u32 bytes0 = (u32)tp->rx_opt.tarr_r * mss0;
++		if (bytes0 <= tp->rcv_wnd)
++			tp->tarr_r_recv = tp->rx_opt.tarr_r;
++	}
++
++	/* TARR: enforce requested ACK rate (RFC6994 ExID=0x00AC) */
++	if (tp->tarr_enabled && tp->tarr_r_recv > 0) {
++		u32 mss = tp->advmss ? tp->advmss : 536;
++		u32 rwin = tp->rcv_wnd;
++		u8 safe_r = tp->tarr_r_recv;
++		while (safe_r > 1 && (u32)safe_r * mss > rwin)
++			safe_r--;
++		tp->tarr_segs_rcvd++;
++		if (tp->tarr_segs_rcvd >= safe_r) {
++			tp->tarr_segs_rcvd = 0;
++			tcp_send_ack(sk);
++			return;
++		}
++		tcp_send_delayed_ack(sk);
++		return;
++	}
++
++    /* More than one full frame received... */
+ 	if (((tp->rcv_nxt - tp->rcv_wup) > inet_csk(sk)->icsk_ack.rcv_mss &&
+ 	     /* ... and right edge of window advances far enough.
+ 	      * (tcp_recvmsg() will send ACK otherwise).
+@@ -6784,6 +6824,10 @@ void tcp_finish_connect(struct sock *sk, struct sk_buff *skb)
+ 	 */
+ 	tp->lsndtime = tcp_jiffies32;
+ 
++	/* TARR: mark connection as TARR-capable if peer announced support */
++	if (tp->rx_opt.tarr_cap)
++		tp->tarr_enabled = 1;
++
+ 	if (sock_flag(sk, SOCK_KEEPOPEN))
+ 		tcp_reset_keepalive_timer(sk, keepalive_time_when(tp));
+ 
+@@ -6892,6 +6936,23 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
+ 	SKB_DR(reason);
+ 
+ 	tcp_parse_options(sock_net(sk), skb, &tp->rx_opt, 0, &foc);
++
++	/* TARR: update receiver ACK rate from parsed option */
++	/* Receiver MUST ignore R if R*MSS > current rwin (draft Section 3.2) */
++	if (tp->tarr_enabled && tp->rx_opt.tarr_r > 0) {
++		u32 mss = tp->advmss ? tp->advmss : 536;
++		u32 bytes = (u32)tp->rx_opt.tarr_r * mss;
++		if (bytes <= tp->rcv_wnd)
++			tp->tarr_r_recv = tp->rx_opt.tarr_r;
++	}
++
++	/* TARR: R=0 means immediate ACK without changing steady state */
++	if (tp->tarr_enabled && tp->rx_opt.tarr_cap &&
++	    tp->rx_opt.tarr_r == 0 && tp->rx_opt.tarr_r != tp->tarr_r_recv) {
++		tp->tarr_segs_rcvd = 0;
++		tcp_enter_quickack_mode(sk, 1);
++	}
++
+ 	if (tp->rx_opt.saw_tstamp && tp->rx_opt.rcv_tsecr)
+ 		tp->rx_opt.rcv_tsecr -= tp->tsoffset;
+ 
+@@ -7069,6 +7130,10 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
+ #endif
+ 		tcp_set_state(sk, TCP_SYN_RECV);
+ 
++		/* TARR: peer sent SYN with TARR capability */
++		if (tp->rx_opt.tarr_cap)
++			tp->tarr_enabled = 1;
++
+ 		if (tp->rx_opt.saw_tstamp) {
+ 			tp->rx_opt.tstamp_ok = 1;
+ 			tcp_store_ts_recent(tp);
+@@ -7534,6 +7599,8 @@ static void tcp_openreq_init(struct request_sock *req,
+ 	tcp_rsk(req)->accecn_fail_mode = 0;
+ 	tcp_rsk(req)->syn_ect_rcv = 0;
+ 	tcp_rsk(req)->syn_ect_snt = 0;
++	/* TARR: remember if SYN announced TARR capability */
++	tcp_rsk(req)->tarr_cap = rx_opt->tarr_cap;
+ 	req->mss = rx_opt->mss_clamp;
+ 	req->ts_recent = rx_opt->saw_tstamp ? rx_opt->rcv_tsval : 0;
+ 	ireq->tstamp_ok = rx_opt->tstamp_ok;
+diff --git a/net/ipv4/tcp_ipv4.c b/net/ipv4/tcp_ipv4.c
+index d53d39be291a..1ee1f1ec8145 100644
+--- a/net/ipv4/tcp_ipv4.c
++++ b/net/ipv4/tcp_ipv4.c
+@@ -3541,6 +3541,7 @@ static int __net_init tcp_sk_init(struct net *net)
+ 	net->ipv4.sysctl_tcp_sack = 1;
+ 	net->ipv4.sysctl_tcp_window_scaling = 1;
+ 	net->ipv4.sysctl_tcp_timestamps = 1;
++	net->ipv4.sysctl_tcp_tarr_r = 0;	/* TARR disabled by default */
+ 	net->ipv4.sysctl_tcp_early_retrans = 3;
+ 	net->ipv4.sysctl_tcp_recovery = TCP_RACK_LOSS_DETECTION;
+ 	net->ipv4.sysctl_tcp_slow_start_after_idle = 1; /* By default, RFC2861 behavior.  */
+diff --git a/net/ipv4/tcp_minisocks.c b/net/ipv4/tcp_minisocks.c
+index d9c5a43bd281..191b60cd8e8d 100644
+--- a/net/ipv4/tcp_minisocks.c
++++ b/net/ipv4/tcp_minisocks.c
+@@ -601,6 +601,10 @@ struct sock *tcp_create_openreq_child(const struct sock *sk,
+ 
+ 	newtp->rx_opt.tstamp_ok = ireq->tstamp_ok;
+ 	newtp->rx_opt.sack_ok = ireq->sack_ok;
++
++	/* TARR: propagate capability from request_sock to child socket */
++	if (treq->tarr_cap)
++		newtp->tarr_enabled = 1;
+ 	newtp->window_clamp = req->rsk_window_clamp;
+ 	newtp->rcv_ssthresh = req->rsk_rcv_wnd;
+ 	newtp->rcv_wnd = req->rsk_rcv_wnd;
+diff --git a/net/ipv4/tcp_output.c b/net/ipv4/tcp_output.c
+index 326b58ff1118..1ae28e4841e0 100644
+--- a/net/ipv4/tcp_output.c
++++ b/net/ipv4/tcp_output.c
+@@ -412,6 +412,8 @@ static inline bool tcp_urg_mode(const struct tcp_sock *tp)
+ #define OPTION_MPTCP		BIT(10)
+ #define OPTION_AO		BIT(11)
+ #define OPTION_ACCECN		BIT(12)
++#define OPTION_TARR_CAP	BIT(13)	/* TARR capability announcement */
++#define OPTION_TARR_REQ	BIT(14)	/* TARR R value request */
+ 
+ static void smc_options_write(__be32 *ptr, u16 *options)
+ {
+@@ -440,6 +442,7 @@ struct tcp_out_options {
+ 	__u8 *hash_location;	/* temporary pointer, overloaded */
+ 	__u32 tsval, tsecr;	/* need to include OPTION_TS */
+ 	struct tcp_fastopen_cookie *fastopen_cookie;	/* Fast open cookie */
++	u8 tarr_r;		/* TARR R value to request (0=immediate ACK) */
+ 	struct mptcp_out_options mptcp;
+ };
+ 
+@@ -825,6 +828,24 @@ static void tcp_options_write(struct tcphdr *th, struct tcp_sock *tp,
+ 
+ 	smc_options_write(ptr, &options);
+ 
++
++	/* Write TARR capability option: Kind=254, Len=4, ExID=0x00AC */
++	if (unlikely(OPTION_TARR_CAP & options)) {
++		*ptr++ = htonl((TCPOPT_EXP << 24) |
++			       (TCPOPT_EXP_TARR_LEN_CAP << 16) |
++			       TCPOPT_EXP_TARR_EXID);
++	}
++
++	/* Write TARR R value option: Kind=254, Len=5, ExID=0x00AC, R, NOP*3 */
++	if (unlikely(OPTION_TARR_REQ & options)) {
++		*ptr++ = htonl((TCPOPT_EXP << 24) |
++			       (TCPOPT_EXP_TARR_LEN_REQ << 16) |
++			       TCPOPT_EXP_TARR_EXID);
++		*ptr++ = htonl(((opts->tarr_r << 1) << 24) |
++			       (TCPOPT_NOP << 16) |
++			       (TCPOPT_NOP << 8) |
++			       TCPOPT_NOP);
++	}
+ 	mptcp_options_write(th, ptr, tp, opts);
+ }
+ 
+@@ -1049,6 +1070,12 @@ static unsigned int tcp_syn_options(struct sock *sk, struct sk_buff *skb,
+ 		remaining -= tcp_options_fit_accecn(opts, 0, remaining);
+ 	}
+ 
++	/* TARR capability announcement (RFC6994, ExID=0x00AC) */
++	if (remaining >= TCPOPT_EXP_TARR_LEN_CAP_ALIGNED) {
++		opts->options |= OPTION_TARR_CAP;
++		remaining -= TCPOPT_EXP_TARR_LEN_CAP_ALIGNED;
++	}
++
+ 	bpf_skops_hdr_opt_len(sk, skb, NULL, NULL, 0, opts, &remaining);
+ 
+ 	return MAX_TCP_OPTION_SPACE - remaining;
+@@ -1136,6 +1163,12 @@ static unsigned int tcp_synack_options(const struct sock *sk,
+ 		remaining -= tcp_options_fit_accecn(opts, 0, remaining);
+ 	}
+ 
++	/* TARR capability announcement (RFC6994, ExID=0x00AC) */
++	if (remaining >= TCPOPT_EXP_TARR_LEN_CAP_ALIGNED) {
++		opts->options |= OPTION_TARR_CAP;
++		remaining -= TCPOPT_EXP_TARR_LEN_CAP_ALIGNED;
++	}
++
+ 	bpf_skops_hdr_opt_len((struct sock *)sk, skb, req, syn_skb,
+ 			      synack_type, opts, &remaining);
+ 
+@@ -1222,6 +1255,24 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
+ 		}
+ 	}
+ 
++	/* TARR R value request on data segments */
++	if (tp->tarr_enabled && tp->tarr_r_sent > 0) {
++		unsigned int remaining = MAX_TCP_OPTION_SPACE - size;
++		if (remaining >= TCPOPT_EXP_TARR_LEN_REQ_ALIGNED) {
++			u32 mss2 = tp->advmss ? tp->advmss : 536;
++			u32 limit2 = min_t(u32, tp->snd_wnd,
++					    tp->snd_cwnd * mss2);
++			u8 safe_r = tp->tarr_r_sent;
++			/* Sender MUST NOT request R*MSS > min(rwin, cwnd) */
++			while (safe_r > 1 && (u32)safe_r * mss2 > limit2 &&
++			       limit2 > 0)
++				safe_r--;
++			opts->options |= OPTION_TARR_REQ;
++			opts->tarr_r = safe_r;
++			size += TCPOPT_EXP_TARR_LEN_REQ_ALIGNED;
++		}
++	}
++
+ 	if (unlikely(BPF_SOCK_OPS_TEST_FLAG(tp,
+ 					    BPF_SOCK_OPS_WRITE_HDR_OPT_CB_FLAG))) {
+ 		unsigned int remaining = MAX_TCP_OPTION_SPACE - size;
+@@ -4301,6 +4352,14 @@ int tcp_connect(struct sock *sk)
+ 
+ 	tcp_call_bpf(sk, BPF_SOCK_OPS_TCP_CONNECT_CB, 0, NULL);
+ 
++	/* TARR: set requested ACK rate from sysctl.
++	 * rwin/cwnd validation (draft Section 3.1) is applied dynamically
++	 * per-segment in tcp_established_options(), since "last known rwin"
++	 * and "current cwnd" change over the connection lifetime.
++	 */
++	tp->tarr_r_sent = READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_tarr_r);
++
++
+ #if defined(CONFIG_TCP_MD5SIG) && defined(CONFIG_TCP_AO)
+ 	/* Has to be checked late, after setting daddr/saddr/ops.
+ 	 * Return error if the peer has both a md5 and a tcp-ao key
